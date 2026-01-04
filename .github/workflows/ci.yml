@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        include:
+          # Linux builds
+          - os: ubuntu-latest
+            compiler: gcc
+            version: 11
+            cmake_gen: "Unix Makefiles"
+          - os: ubuntu-latest
+            compiler: clang
+            version: 13
+            cmake_gen: "Unix Makefiles"
+
+          # Windows builds
+          - os: windows-latest
+            compiler: msvc
+            version: 2022
+            cmake_gen: "Visual Studio 17 2022"
+
+          # macOS build
+          - os: macos-latest
+            compiler: clang
+            version: latest
+            cmake_gen: "Unix Makefiles"
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Linux dependencies
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake libssl-dev libgtest-dev libx11-dev libpng-dev libxtst-dev
+
+    - name: Install macOS dependencies
+      if: runner.os == 'macOS'
+      run: |
+        brew install cmake openssl googletest
+
+    - name: Set vcpkg triplet (Windows)
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        if ("${{ matrix.compiler }}" -eq "msvc") {
+          echo "VCPKG_TRIPLET=x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Append
+        } else {
+          echo "VCPKG_TRIPLET=x64-mingw-dynamic" | Out-File -FilePath $env:GITHUB_ENV -Append
+        }
+
+    - name: Setup MinGW on Windows
+      if: matrix.compiler == 'mingw' && runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $url = "${{ matrix.mingw_url }}"
+        $output = "$env:TEMP\mingw.7z"
+        Invoke-WebRequest -Uri $url -OutFile $output
+        &7z x -oC:\ $output > $null
+        $mingwPath = (Get-ChildItem -Path C:\ -Filter "mingw*" -Directory | Select-Object -First 1).FullName
+        echo "$mingwPath\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+    - name: Setup vcpkg (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
+        cd C:\vcpkg
+        .\bootstrap-vcpkg.bat
+        .\vcpkg integrate install
+        echo "CMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
+
+    - name: Install dependencies (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        C:\vcpkg\vcpkg install --triplet ${{ env.VCPKG_TRIPLET }} openssl
+        C:\vcpkg\vcpkg install --triplet ${{ env.VCPKG_TRIPLET }} gtest
+
+    - name: Create build directory
+      run: mkdir build
+
+    - name: Configure CMake
+      working-directory: build
+      run: cmake .. -DCMAKE_BUILD_TYPE=Release -DRICHKWARE_BUILD_TESTS=ON -DCMAKE_TOOLCHAIN_FILE="${{ env.CMAKE_TOOLCHAIN_FILE }}" -G "${{ matrix.cmake_gen }}"
+
+    - name: Build
+      working-directory: build
+      run: |
+        cmake --build . --config Release --parallel 2
+
+    - name: Test
+      working-directory: build
+      run: |
+        ctest --output-on-failure --build-config Release
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: richkware-${{ matrix.os }}-${{ matrix.compiler }}
+        path: |
+          build/bin/
+          build/lib/
